@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"minecraft-status-bot/config"
@@ -13,12 +14,23 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+type StatusUpdate struct {
+	Online     bool
+	ServerIP   string
+	Players    int
+	MaxPlayers int
+	Latency    int64
+}
+
 type Bot struct {
-	session       *discordgo.Session
-	cfg           *config.Config
-	statusMessage *discordgo.Message
-	lastStatus    string
-	orynClient    *orynapi.Client
+	session        *discordgo.Session
+	cfg            *config.Config
+	statusMessage  *discordgo.Message
+	lastStatus     string
+	orynClient     *orynapi.Client
+	maintenanceMu  sync.RWMutex
+	maintenance    bool
+	OnStatusUpdate func(StatusUpdate)
 }
 
 func New(cfg *config.Config) (*Bot, error) {
@@ -48,6 +60,18 @@ func (b *Bot) Start() error {
 
 func (b *Bot) Stop() {
 	b.session.Close()
+}
+
+func (b *Bot) SetMaintenance(on bool) {
+	b.maintenanceMu.Lock()
+	defer b.maintenanceMu.Unlock()
+	b.maintenance = on
+}
+
+func (b *Bot) IsMaintenance() bool {
+	b.maintenanceMu.RLock()
+	defer b.maintenanceMu.RUnlock()
+	return b.maintenance
 }
 
 func (b *Bot) onReady(s *discordgo.Session, event *discordgo.Ready) {
@@ -103,9 +127,21 @@ func (b *Bot) updateServerStatus() {
 		if b.lastStatus != "offline" {
 			log.Println("❌ Server is offline, updating message...")
 		}
-		b.lastStatus = "offline"
+	b.lastStatus = "offline"
+
+	if b.OnStatusUpdate != nil {
+		b.OnStatusUpdate(StatusUpdate{
+			Online:   false,
+			ServerIP: b.cfg.ServerIP,
+		})
+	}
+
+	if b.IsMaintenance() {
+		b.sendMaintenanceEmbed()
+	} else {
 		b.sendOfflineEmbed()
-		return
+	}
+	return
 	}
 
 	if b.lastStatus != "online" {
@@ -113,8 +149,22 @@ func (b *Bot) updateServerStatus() {
 	}
 	b.lastStatus = "online"
 
-	embed := b.buildOnlineEmbed(response)
-	b.editOrCreate(embed)
+	if b.OnStatusUpdate != nil {
+		b.OnStatusUpdate(StatusUpdate{
+			Online:     true,
+			ServerIP:   b.cfg.ServerIP,
+			Players:    response.Players.Online,
+			MaxPlayers: response.Players.Max,
+			Latency:    response.RoundTripLatency,
+		})
+	}
+
+	if b.IsMaintenance() {
+		b.sendMaintenanceEmbed()
+	} else {
+		embed := b.buildOnlineEmbed(response)
+		b.editOrCreate(embed)
+	}
 }
 
 func (b *Bot) buildOnlineEmbed(status *mcstatus.StatusResponse) *discordgo.MessageEmbed {
@@ -188,6 +238,35 @@ func (b *Bot) sendOfflineEmbed() {
 		Color:       0xFF0000,
 		Thumbnail: &discordgo.MessageEmbedThumbnail{
 			URL: "https://cdn-icons-png.flaticon.com/512/1828/1828843.png",
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	b.editOrCreate(embed)
+}
+
+func (b *Bot) sendMaintenanceEmbed() {
+	embed := &discordgo.MessageEmbed{
+		Title:       "🔧 Server Under Maintenance",
+		Description: fmt.Sprintf("The server `%s` is currently under maintenance.\nPlease check back later.", b.cfg.ServerIP),
+		Color:       0xFFAA00,
+		Thumbnail: &discordgo.MessageEmbedThumbnail{
+			URL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
+		},
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "⏱️ Status",
+				Value:  "Maintenance in progress",
+				Inline: true,
+			},
+			{
+				Name:   "🔄 Updates",
+				Value:  fmt.Sprintf("Auto-updates every %ds", b.cfg.UpdateInterval/1000),
+				Inline: true,
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text:    "Maintenance Mode Active",
+			IconURL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
 		},
 		Timestamp: time.Now().Format(time.RFC3339),
 	}

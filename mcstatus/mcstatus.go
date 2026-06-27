@@ -81,7 +81,29 @@ func readVarIntFromReader(reader *bufio.Reader) (int, error) {
 	return result, nil
 }
 
+func resolveSRV(host string) (string, int, error) {
+	_, addrs, err := net.LookupSRV("minecraft", "tcp", host)
+	if err != nil {
+		return host, 0, err
+	}
+	if len(addrs) == 0 {
+		return host, 0, fmt.Errorf("no SRV records found")
+	}
+	srv := addrs[0]
+	target := strings.TrimSuffix(srv.Target, ".")
+	return target, int(srv.Port), nil
+}
+
 func Status(host string, port int) (*StatusResponse, error) {
+	origHost := host
+	origPort := port
+
+	srvHost, srvPort, err := resolveSRV(host)
+	if err == nil && srvPort != 0 {
+		host = srvHost
+		port = srvPort
+	}
+
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
 	start := time.Now()
@@ -95,8 +117,8 @@ func Status(host string, port int) (*StatusResponse, error) {
 	// Build handshake packet
 	handshake := encodeVarInt(0x00)
 	handshake = append(handshake, encodeVarInt(47)...) // protocol version 1.8 (compatible with all servers)
-	handshake = append(handshake, encodeString(host)...)
-	handshake = append(handshake, byte(port>>8), byte(port&0xFF)) // port as UInt16 BE
+	handshake = append(handshake, encodeString(origHost)...)
+	handshake = append(handshake, byte(origPort>>8), byte(origPort&0xFF)) // port as UInt16 BE
 	handshake = append(handshake, encodeVarInt(1)...) // next state: status
 
 	pkt := append(encodeVarInt(len(handshake)), handshake...)
