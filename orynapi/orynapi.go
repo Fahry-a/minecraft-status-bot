@@ -1,6 +1,7 @@
 package orynapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,8 +37,34 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
-func (c *Client) FetchPlayers() (*PlayersResponse, error) {
-	resp, err := c.httpClient.Get(fmt.Sprintf("%s/players", c.baseURL))
+func (c *Client) FetchPlayers(ctx context.Context) (*PlayersResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		resp, err := c.fetchPlayersOnce(ctx)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("all retry attempts failed: %w", lastErr)
+}
+
+func (c *Client) fetchPlayersOnce(ctx context.Context) (*PlayersResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/players", c.baseURL), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch players: %w", err)
 	}

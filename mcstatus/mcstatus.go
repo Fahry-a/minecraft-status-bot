@@ -2,7 +2,7 @@ package mcstatus
 
 import (
 	"bufio"
-	"encoding/binary"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -94,7 +94,28 @@ func resolveSRV(host string) (string, int, error) {
 	return target, int(srv.Port), nil
 }
 
-func Status(host string, port int) (*StatusResponse, error) {
+func Status(ctx context.Context, host string, port int) (*StatusResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		resp, err := statusOnce(ctx, host, port)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("all retry attempts failed: %w", lastErr)
+}
+
+func statusOnce(ctx context.Context, host string, port int) (*StatusResponse, error) {
 	origHost := host
 	origPort := port
 
@@ -106,34 +127,32 @@ func Status(host string, port int) (*StatusResponse, error) {
 
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
-	start := time.Now()
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// Build handshake packet
 	handshake := encodeVarInt(0x00)
-	handshake = append(handshake, encodeVarInt(47)...) // protocol version 1.8 (compatible with all servers)
+	handshake = append(handshake, encodeVarInt(47)...)
 	handshake = append(handshake, encodeString(origHost)...)
-	handshake = append(handshake, byte(origPort>>8), byte(origPort&0xFF)) // port as UInt16 BE
-	handshake = append(handshake, encodeVarInt(1)...) // next state: status
+	handshake = append(handshake, byte(origPort>>8), byte(origPort&0xFF))
+	handshake = append(handshake, encodeVarInt(1)...)
 
 	pkt := append(encodeVarInt(len(handshake)), handshake...)
 	if _, err := conn.Write(pkt); err != nil {
 		return nil, fmt.Errorf("failed to send handshake: %w", err)
 	}
 
-	// Send status request
 	reqData := encodeVarInt(0x00)
 	reqPkt := append(encodeVarInt(len(reqData)), reqData...)
 	if _, err := conn.Write(reqPkt); err != nil {
 		return nil, fmt.Errorf("failed to send status request: %w", err)
 	}
 
-	// Read response
+	start := time.Now()
 	reader := bufio.NewReader(conn)
 
 	if _, err := readVarIntFromReader(reader); err != nil {
@@ -180,5 +199,3 @@ func Status(host string, port int) (*StatusResponse, error) {
 
 	return &status, nil
 }
-
-var _ = binary.BigEndian

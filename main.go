@@ -1,8 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,8 +15,9 @@ import (
 )
 
 const (
-	botName  = "Minecraft Status Bot"
-	botVersion = "v1.0.0"
+	botName     = "Minecraft Status Bot"
+	botVersion  = "v1.0.0"
+	stateFile   = "state.json"
 )
 
 func main() {
@@ -26,14 +28,15 @@ func main() {
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		log.Fatalf("❌ Failed to load config: %v\n", err)
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
 	}
 
 	cons := console.New(botName, botVersion)
 	cons.PrintBanner()
 
 	cons.PrintInfo("Loading configuration...")
-	bot, err := discord.New(cfg)
+	bot, err := discord.New(cfg, stateFile)
 	if err != nil {
 		cons.PrintError(fmt.Sprintf("Failed to create bot: %v", err))
 		os.Exit(1)
@@ -48,12 +51,16 @@ func main() {
 		cons.PrintError(fmt.Sprintf("Failed to start bot: %v", err))
 		os.Exit(1)
 	}
-	defer bot.Stop()
 
 	cons.PrintSuccess("Bot started successfully!")
 	cons.PrintInfo(fmt.Sprintf("Server: %s:%d", cfg.ServerIP, cfg.ServerPort))
 	cons.PrintInfo(fmt.Sprintf("Channel: %s", cfg.ChannelID))
-	cons.PrintMaintenance(false)
+	if bot.IsMaintenance() {
+		cons.PrintWarning("Restored maintenance mode from previous session")
+		cons.PrintMaintenance(true)
+	} else {
+		cons.PrintMaintenance(false)
+	}
 	fmt.Println()
 
 	cons.RegisterCommand("/mt", func(args string) {
@@ -78,25 +85,26 @@ func main() {
 	})
 
 	cons.RegisterCommand("/status", func(args string) {
-		cons.PrintStatus(bot.IsMaintenance(), cfg.ServerIP, false, bot.IsMaintenance())
+		cons.PrintStatus(bot.IsMaintenance(), cfg.ServerIP, -1, -1, bot.IsMaintenance())
 	})
 
 	cons.RegisterCommand("/help", func(args string) {
 		cons.PrintBanner()
 	})
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	cons.RegisterCommand("/quit", func(args string) {
 		cons.PrintInfo("Shutting down bot...")
-		bot.Stop()
-		os.Exit(0)
+		stop()
 	})
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		cons.PrintInfo("\nReceived shutdown signal...")
+		<-ctx.Done()
+		cons.PrintInfo("\nReceived shutdown signal, sending shutdown embed...")
 		bot.Stop()
+		cons.PrintSuccess("Bot shutdown complete.")
 		os.Exit(0)
 	}()
 

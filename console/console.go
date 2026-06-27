@@ -98,7 +98,7 @@ func (c *Console) PrintMaintenance(mode bool) {
 	}
 }
 
-func (c *Console) PrintStatus(online bool, serverIP string, players, mtMode bool) {
+func (c *Console) PrintStatus(online bool, serverIP string, playerCount, maxPlayers int, mtMode bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -113,8 +113,8 @@ func (c *Console) PrintStatus(online bool, serverIP string, players, mtMode bool
 	}
 
 	playersStr := "Unknown"
-	if players {
-		playersStr = "Online"
+	if playerCount >= 0 {
+		playersStr = fmt.Sprintf("%d/%d", playerCount, maxPlayers)
 	}
 
 	fmt.Printf("\n  %s┌─────────────────────────────────────────┐%s\n", colorGray, colorReset)

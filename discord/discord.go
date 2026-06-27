@@ -1,8 +1,9 @@
 package discord
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"minecraft-status-bot/config"
 	"minecraft-status-bot/mcstatus"
 	"minecraft-status-bot/orynapi"
+	"minecraft-status-bot/state"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -31,9 +33,14 @@ type Bot struct {
 	maintenanceMu  sync.RWMutex
 	maintenance    bool
 	OnStatusUpdate func(StatusUpdate)
+	cancel         context.CancelFunc
+	done           chan struct{}
+	shutdownOnce   sync.Once
+	state          *state.State
+	statePath      string
 }
 
-func New(cfg *config.Config) (*Bot, error) {
+func New(cfg *config.Config, statePath string) (*Bot, error) {
 	session, err := discordgo.New("Bot " + cfg.Token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create discord session: %w", err)
@@ -43,11 +50,18 @@ func New(cfg *config.Config) (*Bot, error) {
 		discordgo.IntentsGuildMessages |
 		discordgo.IntentsMessageContent
 
+	st := state.Load(statePath)
+
 	bot := &Bot{
 		session:    session,
 		cfg:        cfg,
 		orynClient: orynapi.NewClient(cfg.OrynApiUrl),
+		done:       make(chan struct{}),
+		state:      st,
+		statePath:  statePath,
 	}
+
+	bot.maintenance = st.Maintenance
 
 	session.AddHandler(bot.onReady)
 
@@ -59,7 +73,25 @@ func (b *Bot) Start() error {
 }
 
 func (b *Bot) Stop() {
-	b.session.Close()
+	b.shutdownOnce.Do(func() {
+		slog.Info("stopping ticker goroutine")
+		if b.cancel != nil {
+			b.cancel()
+		}
+		<-b.done
+
+		slog.Info("saving state before shutdown")
+		b.state.Maintenance = b.maintenance
+		if err := state.Save(b.statePath, b.state); err != nil {
+			slog.Error("failed to save state", "error", err)
+		}
+
+		slog.Info("sending shutdown embed to Discord")
+		b.sendShutdownEmbed()
+
+		slog.Info("closing Discord session")
+		b.session.Close()
+	})
 }
 
 func (b *Bot) SetMaintenance(on bool) {
@@ -75,16 +107,25 @@ func (b *Bot) IsMaintenance() bool {
 }
 
 func (b *Bot) onReady(s *discordgo.Session, event *discordgo.Ready) {
-	log.Printf("✅ Logged in as %s!\n", s.State.User.Username)
+	slog.Info("logged in", "user", s.State.User.Username, "maintenance", b.maintenance)
 
 	b.fetchOrCreateStatusMessage()
 	b.updateServerStatus()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	b.cancel = cancel
+
 	go func() {
+		defer close(b.done)
 		ticker := time.NewTicker(time.Duration(b.cfg.UpdateInterval) * time.Millisecond)
 		defer ticker.Stop()
-		for range ticker.C {
-			b.updateServerStatus()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.updateServerStatus()
+			}
 		}
 	}()
 }
@@ -92,60 +133,61 @@ func (b *Bot) onReady(s *discordgo.Session, event *discordgo.Ready) {
 func (b *Bot) fetchOrCreateStatusMessage() {
 	_, err := b.session.Channel(b.cfg.ChannelID)
 	if err != nil {
-		log.Printf("❌ Error fetching channel: %v\n", err)
+		slog.Error("failed to fetch channel", "error", err)
 		return
 	}
 
 	messages, err := b.session.ChannelMessages(b.cfg.ChannelID, 10, "", "", "")
 	if err != nil {
-		log.Printf("❌ Error fetching messages: %v\n", err)
+		slog.Error("failed to fetch messages", "error", err)
 		return
 	}
 
 	for _, msg := range messages {
 		if msg.Author.ID == b.session.State.User.ID {
-			log.Println("🔄 Existing status message found, updating it...")
+			slog.Info("found existing status message, updating")
 			b.statusMessage = msg
 			return
 		}
 	}
 
-	log.Println("📤 No existing message found, sending a new one...")
+	slog.Info("no existing message found, sending new one")
 	embed := b.generateLoadingEmbed()
 	msg, err := b.session.ChannelMessageSendEmbed(b.cfg.ChannelID, embed)
 	if err != nil {
-		log.Printf("❌ Error sending message: %v\n", err)
+		slog.Error("failed to send message", "error", err)
 		return
 	}
 	b.statusMessage = msg
 }
 
 func (b *Bot) updateServerStatus() {
-	response, err := mcstatus.Status(b.cfg.ServerIP, b.cfg.ServerPort)
+	ctx := context.Background()
+	response, err := mcstatus.Status(ctx, b.cfg.ServerIP, b.cfg.ServerPort)
 	if err != nil {
-		log.Printf("❌ Error fetching Minecraft server status: %v\n", err)
+		slog.Error("failed to fetch server status", "error", err)
 		if b.lastStatus != "offline" {
-			log.Println("❌ Server is offline, updating message...")
+			slog.Info("server is offline")
 		}
-	b.lastStatus = "offline"
+		b.lastStatus = "offline"
 
-	if b.OnStatusUpdate != nil {
-		b.OnStatusUpdate(StatusUpdate{
-			Online:   false,
-			ServerIP: b.cfg.ServerIP,
-		})
-	}
+		if b.OnStatusUpdate != nil {
+			b.OnStatusUpdate(StatusUpdate{
+				Online:   false,
+				ServerIP: b.cfg.ServerIP,
+			})
+		}
 
-	if b.IsMaintenance() {
-		b.sendMaintenanceEmbed()
-	} else {
-		b.sendOfflineEmbed()
-	}
-	return
+		if b.IsMaintenance() {
+			b.sendMaintenanceOfflineEmbed()
+		} else {
+			b.sendOfflineEmbed()
+		}
+		return
 	}
 
 	if b.lastStatus != "online" {
-		log.Println("✅ Server is back online, updating message...")
+		slog.Info("server is back online")
 	}
 	b.lastStatus = "online"
 
@@ -168,7 +210,8 @@ func (b *Bot) updateServerStatus() {
 }
 
 func (b *Bot) buildOnlineEmbed(status *mcstatus.StatusResponse) *discordgo.MessageEmbed {
-	orynData, err := b.orynClient.FetchPlayers()
+	ctx := context.Background()
+	orynData, err := b.orynClient.FetchPlayers(ctx)
 	orynPlayerList := "No players online."
 	if err == nil && orynData != nil && len(orynData.Players) > 0 {
 		var lines []string
@@ -203,7 +246,7 @@ func (b *Bot) buildOnlineEmbed(status *mcstatus.StatusResponse) *discordgo.Messa
 				Inline: true,
 			},
 			{
-				Name:   "👥 Players",
+				Name:   "👥 Players Online",
 				Value:  fmt.Sprintf("%d/%d", status.Players.Online, status.Players.Max),
 				Inline: true,
 			},
@@ -213,7 +256,7 @@ func (b *Bot) buildOnlineEmbed(status *mcstatus.StatusResponse) *discordgo.Messa
 				Inline: true,
 			},
 			{
-				Name:   "🎮 Players",
+				Name:   "📋 Player List",
 				Value:  orynPlayerList,
 				Inline: false,
 			},
@@ -273,15 +316,97 @@ func (b *Bot) sendMaintenanceEmbed() {
 	b.editOrCreate(embed)
 }
 
+func (b *Bot) sendMaintenanceOfflineEmbed() {
+	embed := &discordgo.MessageEmbed{
+		Title:       "🔧🔴 Maintenance + Offline",
+		Description: fmt.Sprintf("The server `%s` is under maintenance and currently offline.\nPlease check back later.", b.cfg.ServerIP),
+		Color:       0xCC5500,
+		Thumbnail: &discordgo.MessageEmbedThumbnail{
+			URL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
+		},
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "🔧 Maintenance",
+				Value:  "Active",
+				Inline: true,
+			},
+			{
+				Name:   "🔴 Server",
+				Value:  "Offline",
+				Inline: true,
+			},
+			{
+				Name:   "📝 Note",
+				Value:  "Bot will resume status updates when maintenance ends.",
+				Inline: false,
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text:    "Maintenance Mode Active",
+			IconURL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	b.editOrCreate(embed)
+}
+
+func (b *Bot) sendShutdownEmbed() {
+	title := "🔴 Bot Offline"
+	statusText := "Bot Offline"
+	color := 0x808080
+
+	if b.maintenance {
+		title = "🔧🔴 Bot Offline (Maintenance)"
+		statusText = "Bot Offline + Maintenance Active"
+		color = 0xCC5500
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       title,
+		Description: fmt.Sprintf("The Minecraft Status Bot for `%s` has been shut down.\nServer status updates are paused.", b.cfg.ServerIP),
+		Color:       color,
+		Thumbnail: &discordgo.MessageEmbedThumbnail{
+			URL: "https://cdn-icons-png.flaticon.com/512/1828/1828843.png",
+		},
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:   "⏱️ Status",
+				Value:  statusText,
+				Inline: true,
+			},
+			{
+				Name:   "🕐 Shutdown At",
+				Value:  time.Now().Format("2006-01-02 15:04:05"),
+				Inline: true,
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text:    "Bot will resume on next startup",
+			IconURL: "https://cdn-icons-png.flaticon.com/512/1828/1828843.png",
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	if b.statusMessage != nil {
+		_, err := b.session.ChannelMessageEditEmbed(b.cfg.ChannelID, b.statusMessage.ID, embed)
+		if err != nil {
+			slog.Warn("failed to edit status message with shutdown embed, sending new one", "error", err)
+			b.session.ChannelMessageSendEmbed(b.cfg.ChannelID, embed)
+		}
+	} else {
+		b.session.ChannelMessageSendEmbed(b.cfg.ChannelID, embed)
+	}
+}
+
 func (b *Bot) editOrCreate(embed *discordgo.MessageEmbed) {
 	if b.statusMessage == nil {
-		log.Println("⚠️ Status message missing! Resending...")
+		slog.Warn("status message missing, resending")
 		b.fetchOrCreateStatusMessage()
 	}
 
 	_, err := b.session.ChannelMessageEditEmbed(b.cfg.ChannelID, b.statusMessage.ID, embed)
 	if err != nil {
-		log.Println("⚠️ Status message might have been deleted, creating a new one...")
+		slog.Warn("status message might have been deleted, creating new one")
 		b.fetchOrCreateStatusMessage()
 		if b.statusMessage != nil {
 			b.session.ChannelMessageEditEmbed(b.cfg.ChannelID, b.statusMessage.ID, embed)
