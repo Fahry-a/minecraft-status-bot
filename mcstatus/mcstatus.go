@@ -94,9 +94,9 @@ func Status(host string, port int) (*StatusResponse, error) {
 
 	// Build handshake packet
 	handshake := encodeVarInt(0x00)
-	handshake = append(handshake, encodeVarInt(767)...) // protocol version 1.21
+	handshake = append(handshake, encodeVarInt(47)...) // protocol version 1.8 (compatible with all servers)
 	handshake = append(handshake, encodeString(host)...)
-	handshake = append(handshake, encodeVarInt(port)...)
+	handshake = append(handshake, byte(port>>8), byte(port&0xFF)) // port as UInt16 BE
 	handshake = append(handshake, encodeVarInt(1)...) // next state: status
 
 	pkt := append(encodeVarInt(len(handshake)), handshake...)
