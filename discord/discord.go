@@ -227,6 +227,16 @@ func (b *Bot) updateServerStatus() {
 		if len(playerList) > 1024 {
 			playerList = playerList[:1020] + "..."
 		}
+	} else if len(response.Players.Sample) > 0 {
+		playerCount = len(response.Players.Sample)
+		var lines []string
+		for i, p := range response.Players.Sample {
+			lines = append(lines, fmt.Sprintf("`%d.` **%s**", i+1, p.Name))
+		}
+		playerList = strings.Join(lines, "\n")
+		if len(playerList) > 1024 {
+			playerList = playerList[:1020] + "..."
+		}
 	}
 
 	motd := response.MOTD.Clean
