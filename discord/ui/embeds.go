@@ -50,6 +50,13 @@ func capacityPercent(online, max int) int {
 	return online * 100 / max
 }
 
+func nonEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
 func durationSince(t time.Time) string {
 	if t.IsZero() {
 		return "N/A"
@@ -88,6 +95,10 @@ func baseEmbed(title, description string, color int, iconURL, updateText string)
 }
 
 func OnlineEmbed(serverIP string, serverPort int, status *StatusData, st *state.State, updateInterval int) *discordgo.MessageEmbed {
+	if status == nil {
+		return LoadingEmbed(serverIP, serverPort, updateInterval)
+	}
+
 	addr := serverAddress(serverIP, serverPort)
 	capacity := capacityPercent(status.PlayersOnline, status.PlayersMax)
 	activity := "Freshly detected"
@@ -108,14 +119,14 @@ func OnlineEmbed(serverIP string, serverPort int, status *StatusData, st *state.
 	embed.Fields = []*discordgo.MessageEmbedField{
 		{Name: "👥 Players", Value: fmt.Sprintf("**%d/%d** online\n%d%% slot usage", status.PlayersOnline, status.PlayersMax, capacity), Inline: true},
 		{Name: "📶 Latency", Value: fmt.Sprintf("**%dms**\nRound-trip ping", status.Latency), Inline: true},
-		{Name: "🎮 Version", Value: fmt.Sprintf("**%s**\nProtocol `%d`", status.Version, status.Protocol), Inline: true},
+		{Name: "🎮 Version", Value: fmt.Sprintf("**%s**\nProtocol `%d`", nonEmpty(status.Version, "Unknown"), status.Protocol), Inline: true},
 		{Name: "📌 Address", Value: fmt.Sprintf("`%s`", addr), Inline: true},
 		{Name: "🕒 Online Since", Value: activity, Inline: true},
-		{Name: "💬 MOTD", Value: status.MOTD, Inline: false},
+		{Name: "💬 MOTD", Value: nonEmpty(status.MOTD, "No message"), Inline: false},
 	}
 
 	if status.PlayerCount > 0 {
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: fmt.Sprintf("🧑 Active Players (%d)", status.PlayerCount), Value: status.PlayerList, Inline: false})
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: fmt.Sprintf("🧑 Active Players (%d)", status.PlayerCount), Value: nonEmpty(status.PlayerList, "Player details unavailable."), Inline: false})
 	} else {
 		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "🧑 Active Players", Value: "No players are currently online.", Inline: false})
 	}
