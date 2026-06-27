@@ -10,18 +10,44 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-const separator = "━━━━━━━━━━━━━━━━"
+const (
+	brandIconURL       = "https://cdn-icons-png.flaticon.com/512/906/906361.png"
+	offlineIconURL     = "https://cdn-icons-png.flaticon.com/512/1828/1828843.png"
+	maintenanceIconURL = "https://cdn-icons-png.flaticon.com/512/2885/2885417.png"
+)
+
+func serverAddress(serverIP string, serverPort int) string {
+	return fmt.Sprintf("%s:%d", serverIP, serverPort)
+}
+
+func updateCadence(updateInterval int) string {
+	if updateInterval <= 0 {
+		return "Auto refresh enabled"
+	}
+	return fmt.Sprintf("Auto refresh • every %ds", updateInterval/1000)
+}
 
 func playerBar(online, max int) string {
-	if max == 0 {
-		return "░░░░░░░░░░"
+	if max <= 0 {
+		return "▱▱▱▱▱▱▱▱▱▱"
 	}
+
 	percent := float64(online) / float64(max)
-	filled := int(percent * 10)
+	filled := int(percent*10 + 0.5)
+	if filled < 0 {
+		filled = 0
+	}
 	if filled > 10 {
 		filled = 10
 	}
-	return strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
+	return strings.Repeat("▰", filled) + strings.Repeat("▱", 10-filled)
+}
+
+func capacityPercent(online, max int) int {
+	if max <= 0 {
+		return 0
+	}
+	return online * 100 / max
 }
 
 func durationSince(t time.Time) string {
@@ -41,227 +67,153 @@ func durationSince(t time.Time) string {
 	}
 }
 
-func OnlineEmbed(serverIP string, serverPort int, status *StatusData, st *state.State, updateInterval int) *discordgo.MessageEmbed {
-	serverAddr := fmt.Sprintf("%s:%d", serverIP, serverPort)
-	playersLine := fmt.Sprintf("👥 %d/%d Players", status.PlayersOnline, status.PlayersMax)
-	pingLine := fmt.Sprintf("📶 %dms", status.Latency)
-	versionLine := fmt.Sprintf("🎮 %s", status.Version)
-
-	capacityPercent := 0
-	if status.PlayersMax > 0 {
-		capacityPercent = status.PlayersOnline * 100 / status.PlayersMax
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "N/A"
 	}
-	bar := playerBar(status.PlayersOnline, status.PlayersMax)
-	capacityLine := fmt.Sprintf("%s %d%%", bar, capacityPercent)
+	return t.Format("2006-01-02 15:04:05 MST")
+}
 
-	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("**%s**\n", serverAddr))
-	desc.WriteString("\n")
-	desc.WriteString(separator)
-	desc.WriteString("\n")
-	desc.WriteString(fmt.Sprintf("%s\n", playersLine))
-	desc.WriteString(fmt.Sprintf("%s\n", pingLine))
-	desc.WriteString(fmt.Sprintf("%s\n", versionLine))
-	desc.WriteString("\n")
-	desc.WriteString(fmt.Sprintf("```%s```", capacityLine))
-	desc.WriteString("\n")
-	desc.WriteString(separator)
-
-	if status.MOTD != "" {
-		desc.WriteString("\n")
-		desc.WriteString(fmt.Sprintf("📢 %s", status.MOTD))
-		desc.WriteString("\n")
-		desc.WriteString(separator)
-	}
-
-	if status.PlayerCount > 0 {
-		desc.WriteString("\n")
-		desc.WriteString(fmt.Sprintf("**Online:**\n%s", status.PlayerList))
-	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "🟢 Minecraft Server Online",
-		Description: desc.String(),
-		Color:       0x00FF00,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: fmt.Sprintf("https://api.mcsrvstat.us/icon/%s", serverIP),
-		},
-		Image: &discordgo.MessageEmbedImage{
-			URL: fmt.Sprintf("https://mcapi.us/server/image?theme=dark&ip=%s:%d", serverIP, serverPort),
-		},
+func baseEmbed(title, description string, color int, iconURL, updateText string) *discordgo.MessageEmbed {
+	return &discordgo.MessageEmbed{
+		Title:       title,
+		Description: description,
+		Color:       color,
 		Footer: &discordgo.MessageEmbedFooter{
-			Text:    fmt.Sprintf("Auto-updates every %ds", updateInterval/1000),
-			IconURL: "https://cdn-icons-png.flaticon.com/512/906/906361.png",
+			Text:    updateText,
+			IconURL: iconURL,
 		},
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
+}
+
+func OnlineEmbed(serverIP string, serverPort int, status *StatusData, st *state.State, updateInterval int) *discordgo.MessageEmbed {
+	addr := serverAddress(serverIP, serverPort)
+	capacity := capacityPercent(status.PlayersOnline, status.PlayersMax)
+	activity := "Freshly detected"
+	if st != nil && !st.LastOnline.IsZero() {
+		activity = durationSince(st.LastOnline)
+	}
+
+	description := fmt.Sprintf(
+		"### 🟢 Server Online\n`%s` is reachable and accepting players.\n\n**%s** `%d%%` capacity",
+		addr,
+		playerBar(status.PlayersOnline, status.PlayersMax),
+		capacity,
+	)
+
+	embed := baseEmbed("Minecraft Status Dashboard", description, 0x2ECC71, brandIconURL, updateCadence(updateInterval))
+	embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: fmt.Sprintf("https://api.mcsrvstat.us/icon/%s", serverIP)}
+	embed.Image = &discordgo.MessageEmbedImage{URL: fmt.Sprintf("https://mcapi.us/server/image?theme=dark&ip=%s:%d", serverIP, serverPort)}
+	embed.Fields = []*discordgo.MessageEmbedField{
+		{Name: "👥 Players", Value: fmt.Sprintf("**%d/%d** online\n%d%% slot usage", status.PlayersOnline, status.PlayersMax, capacity), Inline: true},
+		{Name: "📶 Latency", Value: fmt.Sprintf("**%dms**\nRound-trip ping", status.Latency), Inline: true},
+		{Name: "🎮 Version", Value: fmt.Sprintf("**%s**\nProtocol `%d`", status.Version, status.Protocol), Inline: true},
+		{Name: "📌 Address", Value: fmt.Sprintf("`%s`", addr), Inline: true},
+		{Name: "🕒 Online Since", Value: activity, Inline: true},
+		{Name: "💬 MOTD", Value: status.MOTD, Inline: false},
+	}
+
+	if status.PlayerCount > 0 {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: fmt.Sprintf("🧑 Active Players (%d)", status.PlayerCount), Value: status.PlayerList, Inline: false})
+	} else {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "🧑 Active Players", Value: "No players are currently online.", Inline: false})
+	}
+
 	return embed
 }
 
 func OfflineEmbed(serverIP string, serverPort int, st *state.State, updateInterval int) *discordgo.MessageEmbed {
-	serverAddr := fmt.Sprintf("%s:%d", serverIP, serverPort)
-
-	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("**%s**\n", serverAddr))
-	desc.WriteString("\n")
-	desc.WriteString(separator)
-	desc.WriteString("\n")
-	desc.WriteString("🔴 Server is currently offline or unreachable.\n")
-	desc.WriteString(separator)
-
-	if !st.LastOnline.IsZero() {
-		desc.WriteString("\n")
-		desc.WriteString(fmt.Sprintf("Last online: %s\n", durationSince(st.LastOnline)))
-		desc.WriteString(fmt.Sprintf("Offline since: %s", durationSince(st.LastOffline)))
+	addr := serverAddress(serverIP, serverPort)
+	embed := baseEmbed(
+		"Minecraft Status Dashboard",
+		fmt.Sprintf("### 🔴 Server Offline\n`%s` cannot be reached right now. The bot will keep checking and update this panel automatically.", addr),
+		0xE74C3C,
+		offlineIconURL,
+		updateCadence(updateInterval),
+	)
+	embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: offlineIconURL}
+	embed.Fields = []*discordgo.MessageEmbedField{
+		{Name: "📌 Address", Value: fmt.Sprintf("`%s`", addr), Inline: true},
+		{Name: "🧭 Status", Value: "Offline / unreachable", Inline: true},
+		{Name: "🛠️ Next Action", Value: "Check server host, network, whitelist, or firewall rules.", Inline: false},
 	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "🔴 Minecraft Server Offline",
-		Description: desc.String(),
-		Color:       0xFF0000,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: "https://cdn-icons-png.flaticon.com/512/1828/1828843.png",
-		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text:    fmt.Sprintf("Auto-updates every %ds", updateInterval/1000),
-			IconURL: "https://cdn-icons-png.flaticon.com/512/1828/1828843.png",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
+	if st != nil && !st.LastOnline.IsZero() {
+		embed.Fields = append(embed.Fields,
+			&discordgo.MessageEmbedField{Name: "✅ Last Seen Online", Value: durationSince(st.LastOnline), Inline: true},
+			&discordgo.MessageEmbedField{Name: "⛔ Offline Since", Value: durationSince(st.LastOffline), Inline: true},
+		)
 	}
 	return embed
 }
 
 func MaintenanceEmbed(serverIP string, serverPort int, st *state.State, updateInterval int) *discordgo.MessageEmbed {
-	serverAddr := fmt.Sprintf("%s:%d", serverIP, serverPort)
-
-	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("**%s**\n", serverAddr))
-	desc.WriteString("\n")
-	desc.WriteString(separator)
-	desc.WriteString("\n")
-	desc.WriteString("🔧 Server is under maintenance.\n")
-	desc.WriteString("Status updates are paused.\n")
-	desc.WriteString(separator)
-
-	if !st.MaintenanceAt.IsZero() {
-		desc.WriteString("\n")
-		desc.WriteString(fmt.Sprintf("Maintenance since: %s", durationSince(st.MaintenanceAt)))
+	addr := serverAddress(serverIP, serverPort)
+	embed := baseEmbed("Minecraft Status Dashboard", fmt.Sprintf("### 🔧 Maintenance Mode\n`%s` is online, but public status is currently paused for maintenance.", addr), 0xF1C40F, maintenanceIconURL, updateCadence(updateInterval))
+	embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: maintenanceIconURL}
+	embed.Fields = []*discordgo.MessageEmbedField{
+		{Name: "📌 Address", Value: fmt.Sprintf("`%s`", addr), Inline: true},
+		{Name: "🧭 Status", Value: "Maintenance active", Inline: true},
+		{Name: "ℹ️ Notice", Value: "Updates are intentionally muted until maintenance mode is disabled.", Inline: false},
 	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "🔧 Server Under Maintenance",
-		Description: desc.String(),
-		Color:       0xFFAA00,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
-		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text:    fmt.Sprintf("Auto-updates every %ds", updateInterval/1000),
-			IconURL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
+	if st != nil && !st.MaintenanceAt.IsZero() {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "🕒 Maintenance Since", Value: durationSince(st.MaintenanceAt), Inline: true})
 	}
 	return embed
 }
 
 func MaintenanceOfflineEmbed(serverIP string, serverPort int, st *state.State, updateInterval int) *discordgo.MessageEmbed {
-	serverAddr := fmt.Sprintf("%s:%d", serverIP, serverPort)
-
-	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("**%s**\n", serverAddr))
-	desc.WriteString("\n")
-	desc.WriteString(separator)
-	desc.WriteString("\n")
-	desc.WriteString("🔧 Maintenance active + 🔴 Server offline.\n")
-	desc.WriteString("Please check back later.\n")
-	desc.WriteString(separator)
-
-	if !st.MaintenanceAt.IsZero() {
-		desc.WriteString("\n")
-		desc.WriteString(fmt.Sprintf("Maintenance since: %s", durationSince(st.MaintenanceAt)))
+	addr := serverAddress(serverIP, serverPort)
+	embed := baseEmbed("Minecraft Status Dashboard", fmt.Sprintf("### 🔧🔴 Maintenance + Offline\n`%s` is under maintenance and currently unreachable.", addr), 0xD35400, maintenanceIconURL, updateCadence(updateInterval))
+	embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: maintenanceIconURL}
+	embed.Fields = []*discordgo.MessageEmbedField{
+		{Name: "📌 Address", Value: fmt.Sprintf("`%s`", addr), Inline: true},
+		{Name: "🧭 Status", Value: "Maintenance + offline", Inline: true},
+		{Name: "ℹ️ Notice", Value: "Please check back later while maintenance is completed.", Inline: false},
 	}
-	if !st.LastOffline.IsZero() {
-		desc.WriteString("\n")
-		desc.WriteString(fmt.Sprintf("Offline since: %s", durationSince(st.LastOffline)))
+	if st != nil && !st.MaintenanceAt.IsZero() {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "🕒 Maintenance Since", Value: durationSince(st.MaintenanceAt), Inline: true})
 	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "🔧🔴 Maintenance + Server Offline",
-		Description: desc.String(),
-		Color:       0xCC5500,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
-		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text:    fmt.Sprintf("Auto-updates every %ds", updateInterval/1000),
-			IconURL: "https://cdn-icons-png.flaticon.com/512/2885/2885417.png",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
+	if st != nil && !st.LastOffline.IsZero() {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "⛔ Offline Since", Value: durationSince(st.LastOffline), Inline: true})
 	}
 	return embed
 }
 
 func ShutdownEmbed(serverIP string, serverPort int, maintenance bool, st *state.State) *discordgo.MessageEmbed {
-	serverAddr := fmt.Sprintf("%s:%d", serverIP, serverPort)
-
-	title := "🔴 Bot Offline"
-	color := 0x808080
-	statusLine := "Bot is offline. Status updates are paused."
-
+	addr := serverAddress(serverIP, serverPort)
+	color := 0x95A5A6
+	icon := offlineIconURL
+	stateText := "Bot offline"
+	description := fmt.Sprintf("### ⚫ Bot Stopped\n`%s` will no longer receive live status updates until the bot starts again.", addr)
 	if maintenance {
-		title = "🔧🔴 Bot Offline (Maintenance)"
-		color = 0xCC5500
-		statusLine = "Bot is offline. Maintenance mode was active during shutdown."
+		color = 0xD35400
+		icon = maintenanceIconURL
+		stateText = "Bot offline while maintenance was active"
+		description = fmt.Sprintf("### 🔧⚫ Bot Stopped During Maintenance\n`%s` will restore maintenance state on the next startup.", addr)
 	}
 
-	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("**%s**\n", serverAddr))
-	desc.WriteString("\n")
-	desc.WriteString(separator)
-	desc.WriteString("\n")
-	desc.WriteString(fmt.Sprintf("%s\n", statusLine))
-	desc.WriteString(separator)
-	desc.WriteString("\n")
-	desc.WriteString(fmt.Sprintf("Shutdown at: **%s**\n", time.Now().Format("2006-01-02 15:04:05")))
-	desc.WriteString(fmt.Sprintf("Bot will automatically restore previous state on next startup."))
-
-	embed := &discordgo.MessageEmbed{
-		Title:       title,
-		Description: desc.String(),
-		Color:       color,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: "https://cdn-icons-png.flaticon.com/512/1828/1828843.png",
-		},
-		Footer: &discordgo.MessageEmbedFooter{
-			Text:    "Bot will resume on next startup",
-			IconURL: "https://cdn-icons-png.flaticon.com/512/1828/1828843.png",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
+	embed := baseEmbed("Minecraft Status Dashboard", description, color, icon, "Bot will resume on next startup")
+	embed.Thumbnail = &discordgo.MessageEmbedThumbnail{URL: icon}
+	embed.Fields = []*discordgo.MessageEmbedField{
+		{Name: "📌 Address", Value: fmt.Sprintf("`%s`", addr), Inline: true},
+		{Name: "🧭 Status", Value: stateText, Inline: true},
+		{Name: "🕒 Shutdown At", Value: formatTime(time.Now()), Inline: false},
+	}
+	if st != nil && !st.LastOnline.IsZero() {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "✅ Last Online", Value: durationSince(st.LastOnline), Inline: true})
 	}
 	return embed
 }
 
 func LoadingEmbed(serverIP string, serverPort, updateInterval int) *discordgo.MessageEmbed {
-	serverAddr := fmt.Sprintf("%s:%d", serverIP, serverPort)
-
-	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf("**%s**\n", serverAddr))
-	desc.WriteString("\n")
-	desc.WriteString(separator)
-	desc.WriteString("\n")
-	desc.WriteString("Fetching server status...\n")
-	desc.WriteString(separator)
-
-	return &discordgo.MessageEmbed{
-		Title:       "⏳ Loading",
-		Description: desc.String(),
-		Color:       0xFFFF00,
-		Footer: &discordgo.MessageEmbedFooter{
-			Text:    fmt.Sprintf("Auto-updates every %ds", updateInterval/1000),
-			IconURL: "https://cdn-icons-png.flaticon.com/512/906/906361.png",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
+	addr := serverAddress(serverIP, serverPort)
+	embed := baseEmbed("Minecraft Status Dashboard", fmt.Sprintf("### ⏳ Loading Server Data\n`%s` is being checked. The dashboard will refresh shortly.", addr), 0x3498DB, brandIconURL, updateCadence(updateInterval))
+	embed.Fields = []*discordgo.MessageEmbedField{
+		{Name: "📌 Address", Value: fmt.Sprintf("`%s`", addr), Inline: true},
+		{Name: "🧭 Status", Value: "Fetching latest ping result", Inline: true},
 	}
+	return embed
 }
 
 type StatusData struct {
